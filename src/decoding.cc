@@ -8,6 +8,9 @@
 #include "ctranslate2/ops/ops.h"
 #include "dispatch.h"
 
+#define PRINT 0
+
+
 namespace ctranslate2 {
 
   static const ops::Gather gather;
@@ -173,6 +176,7 @@ namespace ctranslate2 {
     return logits;
   }
 
+
   static std::vector<StorageView> build_distributions(const StorageView& history,
                                                       const dim_t batch,
                                                       const dim_t beam,
@@ -189,6 +193,42 @@ namespace ctranslate2 {
       std::copy(src, src + vocab_size, step.data<float>());
       dists.emplace_back(std::move(step));
     }
+    return dists;
+  }
+
+  static std::vector<StorageView> build_distributions_on_dev(const StorageView& history,
+                                                             const dim_t batch,
+                                                             const dim_t beam,
+                                                             const dim_t start,
+                                                             const dim_t end) {
+    if (!history)
+      return {};
+
+    // history must be [batch, beam_or_candidates, time, vocab]
+    const Device device = history.device();
+    const DataType dtype = history.dtype();
+
+    std::vector<StorageView> dists;
+    dists.reserve(end - start);
+
+    // Slice once on batch and beam dimensions.
+    ops::Slide slide_b(0, batch, 1);
+    StorageView b_view(dtype, device);           // [1, beam, time, vocab]
+    slide_b(history, b_view);
+
+    ops::Slide slide_k(1, beam, 1);
+    StorageView bk_view(dtype, device);          // [1, 1, time, vocab]
+    slide_k(b_view, bk_view);
+
+    // Then slice each time step and reshape to [vocab].
+    for (dim_t t = start; t < end; ++t) {
+      ops::Slide slide_t(2, t, 1);
+      StorageView t_view(dtype, device);         // [1, 1, 1, vocab]
+      slide_t(bk_view, t_view);
+      t_view.reshape({t_view.dim(-1)});          // [vocab]
+      dists.emplace_back(std::move(t_view));
+    }
+
     return dists;
   }
 
@@ -546,7 +586,8 @@ namespace ctranslate2 {
       }
 
       disable_tokens.apply();
-      printf("step %d\n", (int)step);
+      if (PRINT) ("step %d\n", (int)step);
+
       StorageView step_logits(dtype, device);
       if (return_logits_vocab)
         step_logits.copy_from(logits);
@@ -583,21 +624,23 @@ namespace ctranslate2 {
       // Unflatten the ids.
       StorageView gather_indices = unflatten_ids(topk_ids, _beam_size, vocabulary_size, is_expanded);
 
-      printf(".....\n");
+      if (PRINT) (".....\n");
       if (return_logits_vocab) {
-      // Shape from [cur_batch_size*(1 or _beam_size), vocab] -> [cur_batch_size, _beam_size, vocab]
         StorageView step_logits_beam(dtype, device);
         step_logits_beam.shallow_copy(step_logits);
         if (!is_expanded)
           repeat_batch(step_logits_beam, _beam_size);
-        split_batch_beam(step_logits_beam, _beam_size);
-        // Append as a new time step; convert to CPU/float32 so build_distributions can read it
-        append_step_output(alive_logits, step_logits_beam.to_float32().to(Device::CPU));
 
-        // Reindex alive history to candidate space for this step (important!)
-        gather_beam_flat(alive_logits, gather_indices, num_candidates);
+        split_batch_beam(step_logits_beam, _beam_size);
+        append_step_output(alive_logits, step_logits_beam);
+
+        // Reindex alive_logits to candidate space with indices on the same device.
+        StorageView gather_indices_for_logits = gather_indices;
+        if (gather_indices_for_logits.device() != alive_logits.device())
+          gather_indices_for_logits = gather_indices_for_logits.to(alive_logits.device());
+        gather_beam_flat(alive_logits, gather_indices_for_logits, num_candidates);
       }
-      printf("-----\n");
+      if (PRINT) ("-----\n");
 
       if (prefix_ids) {
         if (use_hard_prefix) {
@@ -665,10 +708,11 @@ namespace ctranslate2 {
                 if (alive_attention)
                     result.attention.emplace_back(build_attention(alive_attention, i, k, start, end));
 
-                printf("build dist alive_logits size %lu\n", alive_logits.size());
-                if (return_logits_vocab && alive_logits)
-                  result.logits_vocab.emplace_back(build_distributions(alive_logits, i, k, start, end));
-                printf("res logits_vocab size %lu\n", result.logits_vocab.size());
+                if (PRINT) ("build dist alive_logits size %lu\n", alive_logits.size());
+                if (return_logits_vocab && alive_logits) {
+                  result.logits_vocab.emplace_back(build_distributions_on_dev(alive_logits, i, k, start, end));
+                }
+                if (PRINT) ("res logits_vocab size %lu\n", result.logits_vocab.size());
 
                 // Replace by the first non-EOS candidate after the top beam_size ones.
                 for (dim_t j = secondary_candidates_offset; j < num_candidates; ++j) {
@@ -693,7 +737,7 @@ namespace ctranslate2 {
           is_finished = result.hypotheses.size() >= _max_candidates;
 
         if (is_finished) {
-          printf("finalize\n");
+          if (PRINT) ("finalize\n");
           finalize_result(result,
                           num_hypotheses,
                           _length_penalty,
@@ -724,9 +768,13 @@ namespace ctranslate2 {
       if (alive_attention)
         gather_beam_flat(alive_attention, active_beams, _beam_size);
 
-      printf("gather beam_flat alive_logits size %lu\n", alive_logits.size());
-      if (alive_logits)
-        gather_beam_flat(alive_logits, active_beams, _beam_size);
+      if (PRINT) ("gather beam_flat alive_logits size %lu\n", alive_logits.size());
+      if (alive_logits) {
+        StorageView active_beams_for_logits = active_beams;
+        if (active_beams_for_logits.device() != alive_logits.device())
+          active_beams_for_logits = active_beams_for_logits.to(alive_logits.device());
+        gather_beam_flat(alive_logits, active_beams_for_logits, _beam_size);  // device == alive_logits.device()
+      }
 
       // If some sentences finished on this step, ignore them for the next step.
       std::unique_ptr<StorageView> keep_batches;
@@ -742,9 +790,15 @@ namespace ctranslate2 {
         gather(alive_seq, *keep_batches);
         if (alive_attention)
           gather(alive_attention, *keep_batches);
-        printf("gather alive logits\n");
-        if (alive_logits)
-          gather(alive_logits, *keep_batches);
+        if (PRINT) ("gather alive logits\n");
+
+        if (alive_logits) {
+          StorageView keep_batches_for_logits = *keep_batches;
+          if (keep_batches_for_logits.device() != alive_logits.device())
+            keep_batches_for_logits = keep_batches_for_logits.to(alive_logits.device());
+          gather(alive_logits, keep_batches_for_logits);
+        }
+
         if (keep_batches->device() != device)
           *keep_batches = keep_batches->to(device);
       }
