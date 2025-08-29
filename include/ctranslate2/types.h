@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 
-#include <half_float/half.hpp>
+#include "half_float/half.hpp"
 
 #include "bfloat16.h"
 #include "devices.h"

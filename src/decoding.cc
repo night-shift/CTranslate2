@@ -173,6 +173,25 @@ namespace ctranslate2 {
     return logits;
   }
 
+  static std::vector<StorageView> build_distributions(const StorageView& history,
+                                                      const dim_t batch,
+                                                      const dim_t beam,
+                                                      const dim_t start,
+                                                      const dim_t end) {
+    if (!history)
+      return {};
+    const dim_t vocab_size = history.dim(-1);
+    std::vector<StorageView> dists;
+    dists.reserve(end - start);
+    for (dim_t t = start; t < end; ++t) {
+      const float* src = history.index<float>({batch, beam, t, 0});
+      StorageView step({vocab_size}, DataType::FLOAT32);
+      std::copy(src, src + vocab_size, step.data<float>());
+      dists.emplace_back(std::move(step));
+    }
+    return dists;
+  }
+
   static float compute_coverage_penalty(const std::vector<std::vector<float>>& attention,
                                         const float beta) {
     float penalty = 0;
@@ -485,6 +504,8 @@ namespace ctranslate2 {
     StorageView logits(dtype, device);
     StorageView alive_seq(topk_ids.dtype());
     StorageView alive_attention;
+    StorageView alive_logits;
+
 
     const dim_t max_step = get_max_step(max_length,
                                         return_prefix,
@@ -525,13 +546,10 @@ namespace ctranslate2 {
       }
 
       disable_tokens.apply();
-      std::vector<StorageView> logits_vec;
-      if (return_logits_vocab) {
-        if (is_expanded)
-          logits_vec = build_logits(logits, cur_batch_size * _beam_size);
-        else
-          logits_vec = build_logits(logits, cur_batch_size);
-      }
+      printf("step %d\n", (int)step);
+      StorageView step_logits(dtype, device);
+      if (return_logits_vocab)
+        step_logits.copy_from(logits);
 
       StorageView log_probs(dtype, device);
       if (bias_towards_prefix) {
@@ -545,6 +563,7 @@ namespace ctranslate2 {
         ops::LogSoftMax()(logits);
         log_probs.shallow_copy(logits);
       }
+
 
       // Multiply by the current beam log probs.
       if (topk_scores) {
@@ -563,6 +582,22 @@ namespace ctranslate2 {
 
       // Unflatten the ids.
       StorageView gather_indices = unflatten_ids(topk_ids, _beam_size, vocabulary_size, is_expanded);
+
+      printf(".....\n");
+      if (return_logits_vocab) {
+      // Shape from [cur_batch_size*(1 or _beam_size), vocab] -> [cur_batch_size, _beam_size, vocab]
+        StorageView step_logits_beam(dtype, device);
+        step_logits_beam.shallow_copy(step_logits);
+        if (!is_expanded)
+          repeat_batch(step_logits_beam, _beam_size);
+        split_batch_beam(step_logits_beam, _beam_size);
+        // Append as a new time step; convert to CPU/float32 so build_distributions can read it
+        append_step_output(alive_logits, step_logits_beam.to_float32().to(Device::CPU));
+
+        // Reindex alive history to candidate space for this step (important!)
+        gather_beam_flat(alive_logits, gather_indices, num_candidates);
+      }
+      printf("-----\n");
 
       if (prefix_ids) {
         if (use_hard_prefix) {
@@ -586,7 +621,6 @@ namespace ctranslate2 {
 
       // Append last prediction.
       append_step_output(alive_seq, topk_ids, &gather_indices);
-
       if (attention_step) {
         if (!is_expanded)
           repeat_batch(attention_step, _beam_size);
@@ -614,38 +648,40 @@ namespace ctranslate2 {
         dim_t secondary_candidates_offset = _beam_size;
 
         for (dim_t k = 0; k < _beam_size; ++k) {
-          const size_t last_id = topk_ids.at<int32_t>({i, k});
-          dim_t next_beam_id = k;
+            const size_t last_id = topk_ids.at<int32_t>({i, k});
+            dim_t next_beam_id = k;
 
-          if ((is_eos(last_id, end_ids) && step >= prefix_length) || is_last_step_for_batch) {
-            if (k == 0)
-              top_beam_finished[i] = true;
+            // If the top-k slot k is EOS and we replace it by a later candidate j, do it now.
+            if ((is_eos(last_id, end_ids) && step >= prefix_length) || is_last_step_for_batch) {
+                if (k == 0)
+                    top_beam_finished[i] = true;
 
-            const bool ignore_last_token = is_eos(last_id, end_ids) && !include_eos_in_hypotheses;
-            const dim_t start = return_prefix ? 0 : prefix_length;
-            const dim_t end = ignore_last_token ? step : step + 1;
+                const bool ignore_last_token = is_eos(last_id, end_ids) && !include_eos_in_hypotheses;
+                const dim_t start = return_prefix ? 0 : prefix_length;
+                const dim_t end = ignore_last_token ? step : step + 1;
 
-            // Register this hypothesis.
-            result.scores.emplace_back(topk_scores.scalar_at<float>({i, k}));
-            result.hypotheses.emplace_back(build_hypothesis(alive_seq, i, k, start, end));
-            if (alive_attention)
-              result.attention.emplace_back(build_attention(alive_attention, i, k, start, end));
-            if (return_logits_vocab) {
-              result.logits_vocab.emplace_back(std::move(logits_vec[i * cur_batch_size + k]));
+                result.scores.emplace_back(topk_scores.scalar_at<float>({i, k}));
+                result.hypotheses.emplace_back(build_hypothesis(alive_seq, i, k, start, end));
+                if (alive_attention)
+                    result.attention.emplace_back(build_attention(alive_attention, i, k, start, end));
+
+                printf("build dist alive_logits size %lu\n", alive_logits.size());
+                if (return_logits_vocab && alive_logits)
+                  result.logits_vocab.emplace_back(build_distributions(alive_logits, i, k, start, end));
+                printf("res logits_vocab size %lu\n", result.logits_vocab.size());
+
+                // Replace by the first non-EOS candidate after the top beam_size ones.
+                for (dim_t j = secondary_candidates_offset; j < num_candidates; ++j) {
+                    const auto candidate = topk_ids.at<int32_t>({i, j});
+                    if (!is_eos(candidate, end_ids)) {
+                        next_beam_id = j;
+                        secondary_candidates_offset = j + 1;
+                        break;
+                    }
+                }
             }
 
-            // Move another active beam to this position.
-            for (dim_t j = secondary_candidates_offset; j < num_candidates; ++j) {
-              const auto candidate = topk_ids.at<int32_t>({i, j});
-              if (!is_eos(candidate, end_ids)) {
-                next_beam_id = j;
-                secondary_candidates_offset = j + 1;
-                break;
-              }
-            }
-          }
-
-          active_beams.at<int32_t>(i * _beam_size + k) = i * num_candidates + next_beam_id;
+            active_beams.at<int32_t>(i * _beam_size + k) = i * num_candidates + next_beam_id;
         }
 
         bool is_finished = false;
@@ -657,6 +693,7 @@ namespace ctranslate2 {
           is_finished = result.hypotheses.size() >= _max_candidates;
 
         if (is_finished) {
+          printf("finalize\n");
           finalize_result(result,
                           num_hypotheses,
                           _length_penalty,
@@ -687,6 +724,10 @@ namespace ctranslate2 {
       if (alive_attention)
         gather_beam_flat(alive_attention, active_beams, _beam_size);
 
+      printf("gather beam_flat alive_logits size %lu\n", alive_logits.size());
+      if (alive_logits)
+        gather_beam_flat(alive_logits, active_beams, _beam_size);
+
       // If some sentences finished on this step, ignore them for the next step.
       std::unique_ptr<StorageView> keep_batches;
       if (next_batch_size != cur_batch_size) {
@@ -701,6 +742,9 @@ namespace ctranslate2 {
         gather(alive_seq, *keep_batches);
         if (alive_attention)
           gather(alive_attention, *keep_batches);
+        printf("gather alive logits\n");
+        if (alive_logits)
+          gather(alive_logits, *keep_batches);
         if (keep_batches->device() != device)
           *keep_batches = keep_batches->to(device);
       }

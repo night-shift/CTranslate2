@@ -107,7 +107,11 @@ namespace ctranslate2 {
     };
 
 // Convenience macro to call Thrust functions with a default execution policy.
-#define THRUST_CALL(FUN, ...) FUN(thrust::cuda::par_nosync.on(ctranslate2::cuda::get_cuda_stream()), __VA_ARGS__)
+#if defined(THRUST_VERSION) && THRUST_VERSION >= 101600
+  #define THRUST_CALL(FUN, ...) FUN(thrust::cuda::par_nosync.on(ctranslate2::cuda::get_cuda_stream()), __VA_ARGS__)
+#else
+  #define THRUST_CALL(FUN, ...) FUN(thrust::cuda::par.on(ctranslate2::cuda::get_cuda_stream()), __VA_ARGS__)
+#endif
 
   }
 }
