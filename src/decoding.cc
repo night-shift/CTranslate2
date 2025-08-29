@@ -328,6 +328,19 @@ namespace ctranslate2 {
         sort_hypotheses(result, max_hypotheses, keep_scores, keep_attention, keep_logits_vocab);
     }
 
+    static inline void softmax_on_result_vocab(DecodingResult& result)
+    {
+        if (!result.logits_vocab.empty()) {
+            for (auto& hyp_logits : result.logits_vocab) {
+                for (auto& t : hyp_logits) {
+                    ops::SoftMax()(t);
+                    t.move_to(Device::CPU, DataType::FLOAT32);
+                }
+            }
+        }
+
+    }
+
     static inline void finalize_result_with_softmax(DecodingResult& result,
                                                     const size_t max_hypotheses,
                                                     const float length_penalty,
@@ -345,13 +358,8 @@ namespace ctranslate2 {
             keep_logits_vocab
         );
 
-        if (keep_logits_vocab && !result.logits_vocab.empty()) {
-            for (auto& hyp_logits : result.logits_vocab) {
-                for (auto& t : hyp_logits) {
-                    ops::SoftMax()(t);
-                    t.move_to(Device::CPU, DataType::FLOAT32);
-                }
-            }
+        if (keep_logits_vocab) {
+            softmax_on_result_vocab(result);
         }
     }
 
@@ -991,6 +999,9 @@ namespace ctranslate2 {
 
             for (auto& result : final_results) {
                 sort_hypotheses(result, num_hypotheses, return_scores, return_attention, return_logits_vocab);
+                if (return_logits_vocab) {
+                    softmax_on_result_vocab(result);
+                }
             }
 
             return final_results;
@@ -1138,6 +1149,9 @@ namespace ctranslate2 {
                                     return_scores,
                                     return_attention,
                                     return_logits_vocab);
+                    if (return_logits_vocab) {
+                        softmax_on_result_vocab(results[batch_id]);
+                    }
                 } else {
                     non_finished_index.emplace_back(i);
                     sample_from.at<int32_t>(i) = word_id;
