@@ -287,10 +287,11 @@ namespace ctranslate2 {
     else
       result.attention.clear();
 
-    if (keep_logits_vocab)
+    if (keep_logits_vocab) {
       result.logits_vocab = index_vector(result.logits_vocab, idx);
-    else
+    } else {
       result.logits_vocab.clear();
+    }
   }
 
   static inline void finalize_result(DecodingResult& result,
@@ -310,6 +311,32 @@ namespace ctranslate2 {
     }
 
     sort_hypotheses(result, max_hypotheses, keep_scores, keep_attention, keep_logits_vocab);
+  }
+
+  static inline void finalize_result_with_softmax(DecodingResult& result,
+                                                 const size_t max_hypotheses,
+                                                 const float length_penalty,
+                                                 const float coverage_penalty,
+                                                 const bool keep_scores,
+                                                 const bool keep_attention,
+                                                 const bool keep_logits_vocab) {
+    finalize_result(
+      result,
+      max_hypotheses,
+      length_penalty,
+      coverage_penalty,
+      keep_scores,
+      keep_attention,
+      keep_logits_vocab
+    );
+
+    if (keep_logits_vocab && !result.logits_vocab.empty()) {
+      for (auto& hyp_logits : result.logits_vocab) {
+        for (auto& t : hyp_logits) {
+          ops::SoftMax()(t);   // SoftMax over last dim
+        }
+      }
+    }
   }
 
   BiasedDecoder::BiasedDecoder(const float prefix_bias_beta,
@@ -586,11 +613,8 @@ namespace ctranslate2 {
       }
 
       disable_tokens.apply();
-      if (PRINT) ("step %d\n", (int)step);
+      if (PRINT) printf("step %d\n", (int)step);
 
-      StorageView step_logits(dtype, device);
-      if (return_logits_vocab)
-        step_logits.copy_from(logits);
 
       StorageView log_probs(dtype, device);
       if (bias_towards_prefix) {
@@ -606,6 +630,10 @@ namespace ctranslate2 {
       }
 
 
+      StorageView step_logits(dtype, device);
+      if (return_logits_vocab) {
+        step_logits.copy_from(log_probs);
+      }
       // Multiply by the current beam log probs.
       if (topk_scores) {
         DEVICE_AND_TYPE_DISPATCH(log_probs.device(), log_probs.dtype(),
@@ -624,7 +652,7 @@ namespace ctranslate2 {
       // Unflatten the ids.
       StorageView gather_indices = unflatten_ids(topk_ids, _beam_size, vocabulary_size, is_expanded);
 
-      if (PRINT) (".....\n");
+      if (PRINT) printf(".....\n");
       if (return_logits_vocab) {
         StorageView step_logits_beam(dtype, device);
         step_logits_beam.shallow_copy(step_logits);
@@ -640,7 +668,7 @@ namespace ctranslate2 {
           gather_indices_for_logits = gather_indices_for_logits.to(alive_logits.device());
         gather_beam_flat(alive_logits, gather_indices_for_logits, num_candidates);
       }
-      if (PRINT) ("-----\n");
+      if (PRINT) printf("-----\n");
 
       if (prefix_ids) {
         if (use_hard_prefix) {
@@ -708,11 +736,11 @@ namespace ctranslate2 {
                 if (alive_attention)
                     result.attention.emplace_back(build_attention(alive_attention, i, k, start, end));
 
-                if (PRINT) ("build dist alive_logits size %lu\n", alive_logits.size());
+                if (PRINT) printf("build dist alive_logits size %lu\n", alive_logits.size());
                 if (return_logits_vocab && alive_logits) {
                   result.logits_vocab.emplace_back(build_distributions_on_dev(alive_logits, i, k, start, end));
                 }
-                if (PRINT) ("res logits_vocab size %lu\n", result.logits_vocab.size());
+                if (PRINT) printf("res logits_vocab size %lu\n", result.logits_vocab.size());
 
                 // Replace by the first non-EOS candidate after the top beam_size ones.
                 for (dim_t j = secondary_candidates_offset; j < num_candidates; ++j) {
@@ -737,14 +765,16 @@ namespace ctranslate2 {
           is_finished = result.hypotheses.size() >= _max_candidates;
 
         if (is_finished) {
-          if (PRINT) ("finalize\n");
-          finalize_result(result,
-                          num_hypotheses,
-                          _length_penalty,
-                          _coverage_penalty,
-                          return_scores,
-                          return_attention,
-                          return_logits_vocab);
+          if (PRINT) printf("finalize\n");
+          finalize_result_with_softmax(
+            result,
+            num_hypotheses,
+            _length_penalty,
+            _coverage_penalty,
+            return_scores,
+            return_attention,
+            return_logits_vocab
+          );
         } else {
           non_finished_index.emplace_back(i);
         }
@@ -768,7 +798,7 @@ namespace ctranslate2 {
       if (alive_attention)
         gather_beam_flat(alive_attention, active_beams, _beam_size);
 
-      if (PRINT) ("gather beam_flat alive_logits size %lu\n", alive_logits.size());
+      if (PRINT) printf("gather beam_flat alive_logits size %lu\n", alive_logits.size());
       if (alive_logits) {
         StorageView active_beams_for_logits = active_beams;
         if (active_beams_for_logits.device() != alive_logits.device())
@@ -790,7 +820,7 @@ namespace ctranslate2 {
         gather(alive_seq, *keep_batches);
         if (alive_attention)
           gather(alive_attention, *keep_batches);
-        if (PRINT) ("gather alive logits\n");
+        if (PRINT) printf("gather alive logits\n");
 
         if (alive_logits) {
           StorageView keep_batches_for_logits = *keep_batches;
