@@ -811,9 +811,9 @@ namespace ctranslate2 {
 
                 if (is_finished) {
                     if (PRINT) {
-                        printf("finalize\n");
+                        printf("num hyp pre fin %lu\n", result.hypotheses.size());
                     }
-                    finalize_result_with_softmax(
+                    finalize_result(
                         result,
                         num_hypotheses,
                         _length_penalty,
@@ -822,6 +822,9 @@ namespace ctranslate2 {
                         return_attention,
                         return_logits_vocab
                     );
+                    if (PRINT) {
+                        printf("num hyp post fin %lu\n", result.hypotheses.size());
+                    }
                 } else {
                     non_finished_index.emplace_back(i);
                 }
@@ -999,9 +1002,6 @@ namespace ctranslate2 {
 
             for (auto& result : final_results) {
                 sort_hypotheses(result, num_hypotheses, return_scores, return_attention, return_logits_vocab);
-                if (return_logits_vocab) {
-                    softmax_on_result_vocab(result);
-                }
             }
 
             return final_results;
@@ -1149,9 +1149,6 @@ namespace ctranslate2 {
                                     return_scores,
                                     return_attention,
                                     return_logits_vocab);
-                    if (return_logits_vocab) {
-                        softmax_on_result_vocab(results[batch_id]);
-                    }
                 } else {
                     non_finished_index.emplace_back(i);
                     sample_from.at<int32_t>(i) = word_id;
