@@ -8,8 +8,6 @@
 #include "ctranslate2/ops/ops.h"
 #include "dispatch.h"
 
-#define PRINT 0
-
 namespace ctranslate2 {
 
     static const ops::Gather gather;
@@ -642,9 +640,6 @@ namespace ctranslate2 {
             }
 
             disable_tokens.apply();
-            if (PRINT) {
-                printf("step %d\n", (int)step);
-            }
             StorageView step_logits(dtype, device);
             if (return_logits_vocab) {
                 step_logits.copy_from(logits);
@@ -683,9 +678,6 @@ namespace ctranslate2 {
             // Unflatten the ids.
             StorageView gather_indices = unflatten_ids(topk_ids, _beam_size, vocabulary_size, is_expanded);
 
-            if (PRINT) {
-                printf(".....\n");
-            }
             if (return_logits_vocab) {
                 StorageView step_logits_beam(dtype, device);
                 step_logits_beam.shallow_copy(step_logits);
@@ -702,9 +694,6 @@ namespace ctranslate2 {
                     gather_indices_for_logits = gather_indices_for_logits.to(alive_logits.device());
                 }
                 gather_beam_flat(alive_logits, gather_indices_for_logits, num_candidates);
-            }
-            if (PRINT) {
-                printf("-----\n");
             }
 
             if (prefix_ids) {
@@ -776,14 +765,8 @@ namespace ctranslate2 {
                             result.attention.emplace_back(build_attention(alive_attention, i, k, start, end));
                         }
 
-                        if (PRINT) {
-                            printf("build dist alive_logits size %lu\n", alive_logits.size());
-                        }
                         if (return_logits_vocab && alive_logits) {
                             result.logits_vocab.emplace_back(build_distributions_on_dev(alive_logits, i, k, start, end));
-                        }
-                        if (PRINT) {
-                            printf("res logits_vocab size %lu\n", result.logits_vocab.size());
                         }
 
                         // Replace by the first non-EOS candidate after the top beam_size ones.
@@ -810,9 +793,6 @@ namespace ctranslate2 {
                 }
 
                 if (is_finished) {
-                    if (PRINT) {
-                        printf("num hyp pre fin %lu\n", result.hypotheses.size());
-                    }
                     finalize_result(
                         result,
                         num_hypotheses,
@@ -822,9 +802,6 @@ namespace ctranslate2 {
                         return_attention,
                         return_logits_vocab
                     );
-                    if (PRINT) {
-                        printf("num hyp post fin %lu\n", result.hypotheses.size());
-                    }
                 } else {
                     non_finished_index.emplace_back(i);
                 }
@@ -849,9 +826,6 @@ namespace ctranslate2 {
                 gather_beam_flat(alive_attention, active_beams, _beam_size);
             }
 
-            if (PRINT) {
-                printf("gather beam_flat alive_logits size %lu\n", alive_logits.size());
-            }
             if (alive_logits) {
                 StorageView active_beams_for_logits = active_beams;
                 if (active_beams_for_logits.device() != alive_logits.device()) {
@@ -875,9 +849,6 @@ namespace ctranslate2 {
                 gather(alive_seq, *keep_batches);
                 if (alive_attention) {
                     gather(alive_attention, *keep_batches);
-                }
-                if (PRINT) {
-                    printf("gather alive logits\n");
                 }
 
                 if (alive_logits) {
