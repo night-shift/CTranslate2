@@ -27,6 +27,4 @@ rm ctranslate2/*.so*
 cp ../build/out/lib/libctranslate2.so* ctranslate2/
 pip install -e .
 
-patchelf --set-rpath '$ORIGIN' \
-    /home/andi/projects/purple/purple_app/CTranslate2/python/ctranslate2/_ext*.so
 
