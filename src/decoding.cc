@@ -173,6 +173,42 @@ namespace ctranslate2 {
     return logits;
   }
 
+  static std::vector<StorageView> build_distributions_on_dev(const StorageView& history,
+                                                             const dim_t batch,
+                                                             const dim_t beam,
+                                                             const dim_t start,
+                                                             const dim_t end) {
+    if (!history)
+      return {};
+
+    // history must be [batch, beam_or_candidates, time, vocab]
+    const Device device = history.device();
+    const DataType dtype = history.dtype();
+
+    std::vector<StorageView> dists;
+    dists.reserve(end - start);
+
+    // Slice once on batch and beam dimensions.
+    ops::Slide slide_b(0, batch, 1);
+    StorageView b_view(dtype, device);           // [1, beam, time, vocab]
+    slide_b(history, b_view);
+
+    ops::Slide slide_k(1, beam, 1);
+    StorageView bk_view(dtype, device);          // [1, 1, time, vocab]
+    slide_k(b_view, bk_view);
+
+    // Then slice each time step and reshape to [vocab].
+    for (dim_t t = start; t < end; ++t) {
+      ops::Slide slide_t(2, t, 1);
+      StorageView t_view(dtype, device);         // [1, 1, 1, vocab]
+      slide_t(bk_view, t_view);
+      t_view.reshape({t_view.dim(-1)});          // [vocab]
+      dists.emplace_back(std::move(t_view));
+    }
+
+    return dists;
+  }
+
   static float compute_coverage_penalty(const std::vector<std::vector<float>>& attention,
                                         const float beta) {
     float penalty = 0;
@@ -485,6 +521,7 @@ namespace ctranslate2 {
     StorageView logits(dtype, device);
     StorageView alive_seq(topk_ids.dtype());
     StorageView alive_attention;
+    StorageView alive_logits;
 
     const dim_t max_step = get_max_step(max_length,
                                         return_prefix,
@@ -525,13 +562,9 @@ namespace ctranslate2 {
       }
 
       disable_tokens.apply();
-      std::vector<StorageView> logits_vec;
-      if (return_logits_vocab) {
-        if (is_expanded)
-          logits_vec = build_logits(logits, cur_batch_size * _beam_size);
-        else
-          logits_vec = build_logits(logits, cur_batch_size);
-      }
+      StorageView step_logits(dtype, device);
+      if (return_logits_vocab)
+        step_logits.copy_from(logits);
 
       StorageView log_probs(dtype, device);
       if (bias_towards_prefix) {
@@ -563,6 +596,22 @@ namespace ctranslate2 {
 
       // Unflatten the ids.
       StorageView gather_indices = unflatten_ids(topk_ids, _beam_size, vocabulary_size, is_expanded);
+
+      if (return_logits_vocab) {
+        StorageView step_logits_beam(dtype, device);
+        step_logits_beam.shallow_copy(step_logits);
+        if (!is_expanded)
+          repeat_batch(step_logits_beam, _beam_size);
+
+        split_batch_beam(step_logits_beam, _beam_size);
+        append_step_output(alive_logits, step_logits_beam);
+
+        // Reindex alive_logits to candidate space with indices on the same device.
+        StorageView gather_indices_for_logits = gather_indices;
+        if (gather_indices_for_logits.device() != alive_logits.device())
+          gather_indices_for_logits = gather_indices_for_logits.to(alive_logits.device());
+        gather_beam_flat(alive_logits, gather_indices_for_logits, num_candidates);
+      }
 
       if (prefix_ids) {
         if (use_hard_prefix) {
@@ -630,11 +679,11 @@ namespace ctranslate2 {
             result.hypotheses.emplace_back(build_hypothesis(alive_seq, i, k, start, end));
             if (alive_attention)
               result.attention.emplace_back(build_attention(alive_attention, i, k, start, end));
-            if (return_logits_vocab) {
-              result.logits_vocab.emplace_back(std::move(logits_vec[i * k]));
-            }
 
-            // Move another active beam to this position.
+            if (return_logits_vocab && alive_logits)
+              result.logits_vocab.emplace_back(build_distributions_on_dev(alive_logits, i, k, start, end));
+
+            // Replace by the first non-EOS candidate after the top beam_size ones.
             for (dim_t j = secondary_candidates_offset; j < num_candidates; ++j) {
               const auto candidate = topk_ids.at<int32_t>({i, j});
               if (!is_eos(candidate, end_ids)) {
@@ -687,6 +736,13 @@ namespace ctranslate2 {
       if (alive_attention)
         gather_beam_flat(alive_attention, active_beams, _beam_size);
 
+      if (alive_logits) {
+        StorageView active_beams_for_logits = active_beams;
+        if (active_beams_for_logits.device() != alive_logits.device())
+          active_beams_for_logits = active_beams_for_logits.to(alive_logits.device());
+        gather_beam_flat(alive_logits, active_beams_for_logits, _beam_size);  // device == alive_logits.device()
+      }
+
       // If some sentences finished on this step, ignore them for the next step.
       std::unique_ptr<StorageView> keep_batches;
       if (next_batch_size != cur_batch_size) {
@@ -701,6 +757,14 @@ namespace ctranslate2 {
         gather(alive_seq, *keep_batches);
         if (alive_attention)
           gather(alive_attention, *keep_batches);
+
+        if (alive_logits) {
+          StorageView keep_batches_for_logits = *keep_batches;
+          if (keep_batches_for_logits.device() != alive_logits.device())
+            keep_batches_for_logits = keep_batches_for_logits.to(alive_logits.device());
+          gather(alive_logits, keep_batches_for_logits);
+        }
+
         if (keep_batches->device() != device)
           *keep_batches = keep_batches->to(device);
       }
@@ -1380,3 +1444,4 @@ namespace ctranslate2 {
   }
 
 }
+
