@@ -3,6 +3,9 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <thrust/device_ptr.h>
+#include <thrust/reduce.h>
+#include <thrust/extrema.h>
+
 
 #include "cuda/helpers.h"
 #include "type_dispatch.h"

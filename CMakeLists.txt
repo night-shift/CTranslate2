@@ -503,15 +503,16 @@ if (WITH_CUDA)
   message(STATUS "NVCC host compiler: ${CUDA_HOST_COMPILER}")
   message(STATUS "NVCC compilation flags: ${CUDA_NVCC_FLAGS}")
 
-  # We should ensure that the Thrust include directories appear before
-  # -I/usr/local/cuda/include for both GCC and NVCC, so that the headers
-  # are coming from the submodule and not the system.
-  set(THRUST_INCLUDE_DIRS
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/thrust/dependencies/cub
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/thrust
-    )
-  cuda_include_directories(${THRUST_INCLUDE_DIRS})
-  list(APPEND PRIVATE_INCLUDE_DIRECTORIES ${THRUST_INCLUDE_DIRS})
+  # Use CUDA toolkit's bundled Thrust/CUB instead of the vendored copy to
+  # avoid version/API mismatches with newer CUDA releases.
+  # (Previously this forced third_party/thrust ahead of /usr/local/cuda/include.)
+  #set(THRUST_INCLUDE_DIRS
+  #  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/thrust/dependencies/cub
+  #  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/thrust
+  #  )
+  #cuda_include_directories(${THRUST_INCLUDE_DIRS})
+  #list(APPEND PRIVATE_INCLUDE_DIRECTORIES ${THRUST_INCLUDE_DIRS})
+
 
   set(CUTLASS_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cutlass/include
